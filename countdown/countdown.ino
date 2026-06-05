@@ -1,78 +1,82 @@
 #include <Arduino.h>
 #include <TM1637Display.h>
 
-// 1. 定义数码管连接的引脚
+// 1. 定义引脚（保持不变）
 #define CLK 3
 #define DIO 2
-#define BUTTON_PIN 4 // 按键连接到 D4
+#define BUTTON_PIN 4 
 
-// 2. 初始化数码管对象
 TM1637Display display(CLK, DIO);
 
-// 3. 设定倒计时时间（在这里修改时间）
-const int TARGET_HOURS = 3;   // 设定的目标小时
-const int TARGET_MINUTES = 5; // 设定的目标分钟
+// 2. 设定倒计时时间：1分钟（一共 60 秒）
+const long TOTAL_SECONDS = 60; 
+long remainingSeconds = TOTAL_SECONDS;
 
-long remainingSeconds = 0;    // 剩余的总秒数
-bool isRunning = false;       // 倒计时是否已经启动
+// 3. 状态记录变量（核心升级）
+bool isRunning = false;        // 记录当前是“正在倒计时”还是“暂停”
+bool lastButtonState = HIGH;   // 记录上一次按键的状态（用来检测松开和按下的瞬间）
+unsigned long lastTickTime = 0;// 用来精准记录时间，代替容易卡死的 delay(1000)
 
 void setup() {
-  // 初始化按键引脚：使用内部上拉电阻
-  // 这样按键未按下时是高电平，按下时变成低电平
   pinMode(BUTTON_PIN, INPUT_PULLUP);
-  
-  // 设置数码管亮度 (0-7)，4属于中等亮度
   display.setBrightness(4);
   
-  // 计算总秒数
-  remainingSeconds = (TARGET_HOURS * 3600L) + (TARGET_MINUTES * 60L);
-  
-  // 初始状态：显示设定好的总时间（小时和分钟）
-  // 显示格式如：03:05
-  int displayTime = (TARGET_HOURS * 100) + TARGET_MINUTES;
-  display.showNumberDecEx(displayTime, 0b01000000, true); 
+  // 初始状态显示：01:00（1分钟）
+  showTime(remainingSeconds);
 }
 
 void loop() {
-  // 4. 检查按键是否被按下
-  // 因为使用了 INPUT_PULLUP，当按键被按下时，读取到的信号是 LOW
-  if (digitalRead(BUTTON_PIN) == LOW && !isRunning) {
-    delay(50); // 软件去抖动，防止小孩子按按键时由于机械抖动触发两次
+  // --- 需求 1：按键控制 启动 / 暂停 ---
+  int currentButtonState = digitalRead(BUTTON_PIN);
+
+  // 检测按键被按下的“那一瞬间”（从高电平变成低电平）
+  if (lastButtonState == HIGH && currentButtonState == LOW) {
+    delay(50); // 消除按键机械抖动
     if (digitalRead(BUTTON_PIN) == LOW) {
-      isRunning = true; // 启动定时器！
+      
+      // 核心魔术：状态反转！
+      // 如果原来是运行(true)，就变成暂停(false)；反之亦然。
+      isRunning = !isRunning; 
+      
+      // 如果时间已经结束了，再次按下就复位到 1 分钟，方便重复玩
+      if (remainingSeconds <= 0) {
+        remainingSeconds = TOTAL_SECONDS;
+        isRunning = true;
+      }
+    }
+  }
+  // 记录这次的状态，留给下一次循环对比
+  lastButtonState = currentButtonState;
+
+
+  // --- 需求 2：实时秒数倒计时 ---
+  // 如果是启动状态，且时间没到 0
+  if (isRunning && remainingSeconds > 0) {
+    
+    // 检查是否过去了 1 秒钟（1000毫秒）
+    // 这种写法比 delay(1000) 好一万倍，因为在等待的 1 秒内，大脑还能随时响应你的“暂停”按键！
+    if (millis() - lastTickTime >= 1000) {
+      remainingSeconds--;   // 减去 1 秒
+      showTime(remainingSeconds); // 刷新屏幕显示
+      lastTickTime = millis();    // 重新计时下 1 秒
     }
   }
 
-  // 5. 如果定时器启动了，开始倒计时
-  if (isRunning && remainingSeconds >= 0) {
-    
-    long hours = remainingSeconds / 3600;
-    long minutes = (remainingSeconds % 3600) / 60;
-    long seconds = remainingSeconds % 60;
-    
-    int dataToShow = 0;
-    
-    // 逻辑优化：如果时间还很长，显示 小时:分钟
-    if (remainingSeconds > 60) {
-      dataToShow = (hours * 100) + minutes;
-    } 
-    // 如果只剩最后一分钟，显示 分钟:秒数，这样更刺激好玩！
-    else {
-      dataToShow = (minutes * 100) + seconds;
-    }
-    
-    // 在数码管上显示数字，0b01000000 代表点亮中间的冒号 (:)
-    display.showNumberDecEx(dataToShow, 0b01000000, true);
-    
-    // 如果时间到了 00:00，停止倒计时
-    if (remainingSeconds == 0) {
-      isRunning = false;
-      // 这里预留了给下一阶段蜂鸣器响的代码位置
-      // 可以在这里让蜂鸣器发出声音
-    } else {
-      remainingSeconds--; // 减少1秒
-    }
-    
-    delay(1000); // 严格等待 1 秒钟
+  // 如果时间到了 00:00，自动停止
+  if (remainingSeconds == 0 && isRunning) {
+    isRunning = false;
+    // 【下一阶段提示】：以后可以在这里让蜂鸣器大声响起来！
   }
+}
+
+// 4. 专门用来把“总秒数”转换成“分:秒”并显示出来的魔法函数
+void showTime(long totalSecs) {
+  long minutes = totalSecs / 60;
+  long seconds = totalSecs % 60;
+  
+  // 组合成 4 位数字，比如 1分5秒 变成 0105
+  int dataToShow = (minutes * 100) + seconds;
+  
+  // 显示在屏幕上，0b01000000 代表点亮中间的冒号 (:)
+  display.showNumberDecEx(dataToShow, 0b01000000, true);
 }
